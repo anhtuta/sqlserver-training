@@ -1,0 +1,132 @@
+===
+Nhược điểm của kiến trúc của Bee360
+- Việc tập trung logic vào SQL khiến performance bị giảm đi rất nhiều, bởi có nhiều logic nhét vào 1 view, gồm nhiều lệnh JOIN, LEFT JOIN, UNION với nhiều table khác nhau nên rất chậm. Trong khi đó nếu xử lý logic đó phía BE, thì phía SQL chỉ cần 1 câu SQL đơn giản thôi, mọi tính toán phía BE sẽ tiện hơn và nhanh hơn
+- Mọi object đều lưu trong 1 bảng cm_tree, nghe có vẻ cool đấy nhưng đối với những người mới bắt đầu làm quen thì là 1 thảm họa, vì select object từ cái bảng ý chả đủ info đâu, phải join với 1 đống các table khác mới có đủ info! Do mỗi object sẽ phải có các field (column) riêng đúng ko, nên cái bảng cm_tree đó chả có info gì ngoài tên object, kiểu object, last modified...
+- Các cột của table đều có tên là số, chẳng hạn de1234, de5678_id... khiến việc nhớ rất khó khăn, làm xong hầu như quên luôn, lần sau đụng vô là lại research từ đầu, mệt!
+- Nhiều table ko có PK, nên việc dự thừa và ko nhất quán data xảy ra thường xuyên
+- Đa số các report tính toán số liệu đều dùng UNION ALL để lấy data từ nhiều nguồn, sau đó dùng các hàm Aggregate như SUM, AVG... Việc UNION như vậy dư thừa data rất nhiều, cũng ảnh hưởng tới performance
+- Các cột của table có thể đổi tên và đổi kiểu data (bản chất tên nó dùng ID, còn tên hiển thị trên UI mới là thứ có thể đổi được). Việc đổi tên như vậy cũng lằng nhằng
+- Business rất khó hiểu và củ chuối! Khách hàng tạo issue rất ngắn gọn và khó hiểu. Có lẽ họ tạo issue cho họ hiểu thôi, còn những người mới vào làm thì phải tốn nhiều time mới xong được
+- Việc deploy lên test và prd: có patch để tạo script sau đó deploy chỉ cần run SQL script đó khá dễ dàng, tuy nhiên vẫn còn 1 số bước phải làm = tay (manually) trên UI, khiến việc deploy ko nhất quán (vừa phải run code SQL, vừa phải sửa trên UI) và đôi lúc lằng nhằng. Còn nữa, do việc chỉ phụ thuộc vào data nên nếu deploy trên môi trường khác nhau, cột PK mà bị duplicate là lỗi ngay (bởi vì bản chất việc deploy là mang các record, object (view,procedure,index...) từ database này sang db khác)
+- Ko có version control như git, dù có history lưu lại lịch sử các lần sửa script, tuy vậy vẫn ko thể bằng được git
+- Debug khó: lúc tính toán data = các hàm như SUM, AVG... mà sai số liệu thì phải filter theo từng record mà check
+- Mấy kiểu chart report, dùng query để format data cho FE vẽ chart, lúc lỗi thì tìm rất khó, vì nhỡ sai format tý thôi là nó chả hiển thị gì!
+
+===
+Lessons from Bee360:
+- Mọi thứ đều là object, và mọi object đều lưu trong 1 bảng gọi là cm_tree, mặc dù objectType khác nhau
+- Trong bảng cm_tree đó có 1 cột là type, xác định kiểu object (có thể là kiểu User, Employee, Report, Selection...)
+- 1 button trên UI cũng là 1 object lưu trong bảng cm_tree. 1 năm hay 1 tháng cũng là 1 object
+- Các object tham chiếu với nhau thông qua bảng rel, tức là bảng rel sẽ lưu objectA có field1 có tham chiếu tới field2 của objectB
+- Caching: khá đơn giản: sẽ viết 1 view với xử lý logic phức tạp, join tùm lum xong lưu lại. Tạo 1 table tương ứng với view đó. Sau đó tạo 1 procedure để copy data từ view sang table. Cuối cùng tạo 1 procedure sẽ run hàng ngày, sẽ thực thi tất cả các procedure con (dùng để copy data từ view sang table tương ứng). Do đó query từ table chính là cache, và cache này sẽ được update 1 lần/day từ view
+- Patch: muốn copy mọi thứ của task mình làm từ db dev lên db test hay db product thì làm như nào? Trong Bee360 có 1 object gọi là patch, sẽ lưu code SQL của task hiện tại. Tức là giả sử task đang làm sẽ tạo 1 object User, tạo 1 view, tạo 1 procedure, thì cái patch sẽ lưu code tạo ra User, view và procedure đó. Sau đó run cái patch trên từng môi trường là deploy được!
+- (a + b + c)/3 = a/3 + b/3 + c/3. Tức là nếu muốn select trung bình cộng của 1 cột, ta có thể tính = tổng của trung bình của từng row (issue 617, runrate)
+- table1 CROSS JOIN table2 (table2 có DUY NHẤT 1 row, table này là data config, chẳng hạn như data của năm hiện tại)
+- Khi nhận 1 task mới, phải hỏi tại sao phải sửa như vậy. VD: task đó yêu cầu thay thế element A bằng element B, thì phải hỏi tại sao đang dùng A lại phải đổi sang B. A là gì và B là gì...
+- LEFT JOIN ON 2 columns, 1 column có thể bị null:
+Sai:
+SELECT ...
+FROM all_months_demand_org_units md
+LEFT JOIN forecast fc
+ON md.month_id = fc.month_id
+  AND md.demand_orgunit_id = fc.demand_orgunit_id
+
+Đúng:
+SELECT ...
+FROM all_months_demand_org_units md
+LEFT JOIN forecast fc
+ON md.month_id = fc.month_id
+  AND (md.demand_orgunit_id = fc.demand_orgunit_id OR (md.demand_orgunit_id IS NULL AND fc.demand_orgunit_id IS NULL))
+
+- Có vấn đề gì cả team chưa gặp thì có thể hỏi khách hàng, chat trực tiếp trên channel hỏi các expertise, ko nên private chat hỏi 1 người. Khi chat, nếu mention, mà có tag thì nên mention theo tag, ko thì mention cả channel (gõ @)
+
+- Add mới 1 column, cần check xem exist chưa:
+IF NOT EXISTS (
+  SELECT * FROM sys.columns 
+  WHERE object_id = OBJECT_ID(N'[dbo].[table_name]') 
+  AND name = 'column_name'
+)
+BEGIN
+  ALTER TABLE table_name
+  ADD column_name numeric(38, 9) DEFAULT NULL;
+END
+
+- Tìm các bảng mà tên có từ project:
+SELECT * FROM sys.tables
+WHERE name LIKE '%project%'
+
+- SUM OVER dùng để tính giá trị tích lũy khá hay: hãy so sánh
+	+ SUM(Value) OVER (ORDER BY Month), và
+	+ SUM(Value) OVER (PARTITION BY Year ORDER BY Month)
+
+- Từ range value chuyển sang list value, VD, từ table1 sau:
+month_from  month_to  percent
+301         305       5
+302         303       10
+304         307       15
+310         312       20
+Cần chuyển sang table2 sau:
+month_id  percent
+301       5
+302       15
+303       15
+304	      20
+305	      20
+306	      15
+307	      15
+308	      0
+309      	0
+310      	20
+311	      20
+312	      20
+Thì rất đơn giản: CROSS JOIN table1 với bảng months:
+CROSS JOIN cm_bee4it_periodmap_month_fyear mfy
+	WHERE mfy.month_id >= table1.month_from_id AND mfy.month_id <= table1.month_to_id
+
+- Làm ngược lại bài toán trên: từ table2 -> table1:
+cứ select bình thường, tại mỗi row (vd 302) ta cần duyệt từ row tiếp theo tới khi tìm được row nhỏ nhất mà percent khác row hiện tại (là row 304) thì month_to của 302 = 304 - 1 = 303 (row trước đó của row 304). Tương tự, month_to của row 303 cũng là 303, ta có kq sau:
+month_from month_to percent
+301	301	5
+302	303	15
+303	303	15
+304	305	20
+305	305	20
+306	307	15
+307	307	15
+308	309	0
+309	309	0
+310	314	20
+311	314	20
+312	314	20
+Giờ thì dễ rồi, GROUP BY (month_to, percent) và SELECT MIN(month_from) là xong:
+SELECT
+  amp1.month_id AS month_from,
+  COALESCE ((	-- row cuối cùng sẽ NULL nên ta dùng hàm coalesce
+    SELECT TOP 1
+      MIN(amp2.month_id) - 1	-- để tính toán đúng thì các month_id phải là các số tự nhiên liền kề nhau
+    FROM all_month_percentage amp2
+    WHERE amp2.employment_percentage <> amp1.employment_percentage
+      AND amp2.month_id > amp1.month_id
+    GROUP BY amp2.month_id
+  ), amp1.month_id) AS month_to,
+  amp1.employment_percentage
+FROM all_month_percentage amp1
+
+Update: cách trên ko đúng cho mọi case, tham khảo cách khác dùng RANK OVER
+
+- Khi làm task mới, cứ dựa theo format của task cũ mà suy luận ra cách làm.
+	+ VD1: có 1 task liên quan đến tính toán chi phí dự báo (forecast) của cty.
+	Hiện tại đã có các loại chi phí plan, actual, với những view như v_spend_plan, v_spend_act, và các procedure như p_update_spend_plan, p_update_spend_act.
+	Thì việc làm với thằng forecast cũng tương tự: tạo mới các view v_spend_fc, p_update_spend_fc...
+	+ VD2: tạo mới 1 chart trên trang dashboard chẳng hạn. Thì cứ nhìn các chart mẫu đã có sẵn trên trang đó (color, format data, font-size, event when click to....), sau đó làm tương tự
+	+ Việc này hợp với nguyên tắc Single responsibility principle trong SOLID: tức là mỗi 1 view/table/proc chỉ nên giữ 1 trách nhiệm duy nhất (chỉ tính toán data act, fc hay plan gì đó). Nó cũng hợp với nguyên tắc Open/closed principle: khi thêm feature mới thì ko sửa code hiện tại (ko sửa code của table/view/proc có sẵn, mà nên tạo các table/view/proc mới)
+
+- SQL ROUND and trim trailing 0
+SELECT convert(DOUBLE PRECISION, 20.00) UNION ALL
+SELECT convert(DOUBLE PRECISION, 20.50) UNION ALL
+SELECT convert(DOUBLE PRECISION, 20.125) UNION ALL
+SELECT convert(DOUBLE PRECISION, 20.12500) UNION ALL
+SELECT CAST(CAST(12.5800 AS DECIMAL(18,5)) AS float) UNION ALL
+SELECT CAST(CAST(12.5 AS DECIMAL(18,5)) AS float) UNION ALL
+SELECT CAST(CAST(12.58 AS DECIMAL(18,5)) AS float) UNION ALL
+SELECT CAST(CAST(12.00 AS DECIMAL(18,5)) AS float)
